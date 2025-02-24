@@ -1,0 +1,147 @@
+codeunit 50022 "Packaging BOM"
+{
+    var
+        pos: Codeunit "LSC POS Transaction";
+        func: Codeunit "UP Functions";
+        bom_items: record "Packaging Item" temporary;
+
+
+    trigger OnRun()
+    begin
+
+    end;
+
+
+    [EventSubscriber(ObjectType::Codeunit, Codeunit::"LSC POS Transaction Events", 'OnBeforeTotalExecuted', '', false, false)]
+    procedure OnBeforeTotalExecuted(var IsHandled: Boolean; var POSTransaction: Record "LSC POS Transaction")
+    var
+        infocode: record "LSC POS Trans. Infocode Entry";
+        infocode_id: text;
+        infocode_val: text;
+        pos_trans: Codeunit "LSC POS Transaction";
+    begin
+        infocode_id := func.GetConfig('PACKAGING_BOM', 'INFOCODE_ID');
+        infocode_val := func.GetConfig('PACKAGING_BOM', 'INFOCODE_VALUE');
+        if (infocode_id <> '') and (infocode_val <> '') then begin
+            infocode.SetFilter("Receipt No.", POSTransaction."Receipt No.");
+            infocode.SetFilter(Infocode, infocode_id);
+            infocode.SetFilter(Information, infocode_val);
+            if infocode.FindLast() then begin
+                IsHandled := AddPackingBOMItem(POSTransaction."Receipt No.");
+                if IsHandled then
+                    pos_trans.TotalPressed(false);
+            end;
+        end;
+    end;
+
+
+
+    procedure AddPackingBOMItem(receipt: text) isHandled: boolean
+    var
+        msg: text;
+        trans: record "LSC POS Transaction";
+        line: record "LSC POS Trans. Line";
+        item: record item;
+        bom_line: record "Production BOM Line";
+        bom_header: record "Production BOM Header";
+        bom_count: integer;
+        CU: Codeunit 99008923;
+    begin
+        if isPackagingBomDisabled() then
+            exit;
+
+        if isPackagingBomAdded(receipt) then
+            exit;
+
+        line.SetFilter("Receipt No.", receipt);
+        line.SetFilter("Entry Status", '=%1', line."Entry Status"::" ");
+
+        if line.FindLast() then begin
+            repeat begin
+                item.Reset();
+                item.SetFilter("No.", line.Number);
+                if item.FindLast() then begin
+                    if item."Packaging BOM" <> '' then begin
+                        bom_header.Reset();
+                        bom_header.SetFilter("No.", item."Packaging BOM");
+                        if bom_header.FindLast() then begin
+                            bom_line.Reset();
+                            bom_line.SetFilter("Production BOM No.", bom_header."No.");
+                            if bom_line.FindSet() then begin
+                                repeat begin
+                                    bom_items.Reset();
+                                    bom_items.SetFilter(item_code, bom_line."No.");
+                                    if not bom_items.FindLast() then begin
+                                        bom_count := bom_count + 1;
+                                        bom_items.Init();
+                                        bom_items.no_ := bom_count;
+                                        bom_items.receipt_no := receipt;
+                                        bom_items.item_code := bom_line."No.";
+                                        bom_items.item_desc := bom_line.Description;
+                                        bom_items.quantity := bom_line."Quantity per" * line.Quantity;
+                                        bom_items.Insert();
+                                    end
+                                    else begin
+                                        bom_items.quantity := bom_items.quantity + (bom_line.Quantity * line.Quantity);
+                                        bom_items.Modify();
+                                    end;
+                                    // pos.PluKeyPressed(bom_line."No.");
+                                end until bom_line.Next() = 0;
+                            end;
+                        end;
+                    end;
+                end;
+            end until line.Next(-1) = 0;
+        end;
+
+        msg := '';
+        bom_items.Reset();
+        if bom_items.FindSet() then begin
+            repeat begin
+                msg := msg + bom_items.item_code + ' ' + format(bom_items.quantity) + '\';
+                pos.PluKeyPressed(bom_items.item_code);
+                line.Reset();
+                line.SetFilter("Receipt No.", receipt);
+                line.SetFilter(Number, bom_items.item_code);
+                line.FindLast();
+                line.Quantity := bom_items.quantity;
+                line.Modify(true);
+                // pos.TotalPressed(false);
+                // pos.CalcTotals();
+            end until bom_items.Next() = 0;
+            trans.SetFilter("Receipt No.", receipt);
+            if trans.FindLast() then begin
+                trans.PackagingBOMApplied := true;
+                trans.Modify();
+                commit;
+                isHandled := true;
+            end;
+        end;
+    end;
+
+    local procedure isPackagingBomAdded(receipt: text) added: Boolean
+    var
+        trans: record "LSC POS Transaction";
+    begin
+        trans.SetFilter("Receipt No.", receipt);
+        if trans.FindLast() then begin
+            if trans.PackagingBOMApplied then
+                added := true;
+        end;
+    end;
+
+    local procedure isPackagingBomDisabled() disabled: Boolean
+    var
+        config: record "TWC Configuration";
+        store: record "LSC Store";
+        pos: Codeunit "LSC POS Session";
+    begin
+        config.SetFilter(Key_, '@PackagingBOM');
+        config.SetFilter(Name, '@Disable');
+        config.SetFilter(Value_, '1');
+
+        store.SetFilter("No.", pos.StoreNo());
+        if (config.FindLast() or store.DisablePackagingBom) then
+            disabled := true;
+    end;
+}
